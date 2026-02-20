@@ -1,216 +1,161 @@
 #!/usr/bin/env python3
 """
-cli.py – Interactive command-line chatbot for the Sales Call GenAI Chatbot.
-
-Usage:
-    python cli.py
-
-Available commands (type at the prompt):
-    list my call ids
-    summarise the last call
-    summarise call <call_id>
-    ingest a new call transcript from <path>
-    help
-    exit / quit
-    <any other text>  →  Q&A over all ingested transcripts
+cli.py – MVC Controller for the Sales Call GenAI Chatbot.
 """
 
 import os
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.rule import Rule
 
-# Load .env before importing src modules (OPENAI_API_KEY etc.)
+# Load .env before imports
 load_dotenv()
+
+from src.storage import ChromaVectorStore
+from src.generation import ProviderFactory
+from src.copilot import SalesCopilot
+from src.processor import TranscriptProcessor
+from src.view import ConsoleView
+from src.models import QueryResponse
 
 # Default folder that is auto-ingested on every startup
 DATA_FOLDER = os.getenv("DATA_FOLDER", "./data")
 
-from src.generation import answer_question, summarise_call
-from src.storage import get_call_ids, get_latest_call_id, ingest_transcript
-from src.models import QueryResponse
+class SalesChatbotController:
+    def __init__(self):
+        self.view = ConsoleView()
+        self.processor = TranscriptProcessor()
+        self.vector_store = ChromaVectorStore()
+        self.llm_provider = ProviderFactory.get_provider()
+        self.copilot = SalesCopilot(self.vector_store, self.llm_provider)
 
-console = Console()
-
-def _handle_ingest_folder(folder_path: str, silent: bool = False) -> None:
-    """Ingest all .txt files in a folder, printing progress for each."""
-    folder = Path(folder_path)
-    if not folder.is_dir():
-        console.print(f"[red]Folder not found:[/red] {folder_path}")
-        return
-    txt_files = sorted(folder.glob("*.txt"))
-    if not txt_files:
-        if not silent:
-            console.print(f"[yellow]No .txt files found in {folder_path}[/yellow]")
-        return
-    if not silent:
-        console.print(f"\n[bold]Bulk ingesting {len(txt_files)} file(s) from[/bold] [cyan]{folder_path}[/cyan]")
-    ok, failed = 0, 0
-    for txt in txt_files:
-        try:
-            with console.status(f"  Ingesting [cyan]{txt.name}[/cyan]…", spinner="dots"):
-                call_id = ingest_transcript(str(txt))
+    def _handle_ingest_folder(self, folder_path: str, silent: bool = False) -> None:
+        """Ingest all .txt files in a folder, delegating to View for progress."""
+        folder = Path(folder_path)
+        if not folder.is_dir():
+            self.view.display_error(f"Folder not found: {folder_path}")
+            return
+        
+        txt_files = sorted(folder.glob("*.txt"))
+        if not txt_files:
             if not silent:
-                console.print(f"  [green]✓[/green] {txt.name} → [bold]{call_id}[/bold]")
-            ok += 1
-        except Exception as e:
-            console.print(f"  [red]✗[/red] {txt.name}: {e}")
-            failed += 1
-    if not silent:
-        console.print(f"\n[bold green]Done:[/bold green] {ok} ingested, {failed} failed.")
+                self.view.display_warning(f"No .txt files found in {folder_path}")
+            return
+        
+        if not silent:
+            self.view.display_bulk_ingest_start(len(txt_files), folder_path)
+        
+        ok, failed = 0, 0
+        for txt in txt_files:
+            try:
+                with self.view.show_status(f"  Ingesting [cyan]{txt.name}[/cyan]…"):
+                    processed = self.processor.process_file(str(txt))
+                    call_id = self.vector_store.ingest_transcript(
+                        processed["call_id"], 
+                        processed["call_title"], 
+                        processed["chunks"]
+                    )
+                if not silent:
+                    self.view.display_success(f"{txt.name} → [bold]{call_id}[/bold]")
+                ok += 1
+            except Exception as e:
+                self.view.display_message(f"  [red]✗[/red] {txt.name}: {e}")
+                failed += 1
+        
+        if not silent:
+            self.view.display_bulk_ingest_done(ok, failed)
 
+    def _handle_list(self) -> None:
+        ids = self.vector_store.get_call_ids()
+        self.view.display_call_ids(ids)
 
-BANNER = """
-# 🎙 Sales Call GenAI Chatbot
+    def _handle_summarise(self, call_id: str) -> None:
+        self.view.display_message(f"\n[bold]Summarising call:[/bold] [cyan]{call_id}[/cyan]\n")
+        with self.view.show_status("Generating summary…"):
+            response = self.copilot.summarise_call(call_id)
+        self.view.display_response(response, show_sources=False)
 
-Type a question, or use one of the built-in commands:
-
-| Command | What it does |
-|---|---|
-| `list my call ids` | Show all ingested calls |
-| `summarise the last call` | Summarise the most recent call |
-| `summarise call <call_id>` | Summarise a specific call |
-| `ingest a new call transcript from <path>` | Add a new transcript |
-| `ingest all from <folder>` | Ingest all .txt files from a folder |
-| `help` | Show this message |
-| `exit` / `quit` | Quit |
-"""
-
-
-def _print_response(response: QueryResponse, show_sources: bool = True) -> None:
-    """Render the LLM answer and, optionally, source snippets."""
-    console.print(Markdown(response.answer))
-
-    if show_sources and response.sources:
-        console.print()
-        console.print(Rule("📎 Sources", style="dim"))
-        for i, r in enumerate(response.sources, 1):
-            preview = r.chunk.text.strip().replace("\n", " ")[:150]
-            score = 1 - r.distance  # cosine similarity
-            console.print(
-                f"  [cyan][Source {i}][/cyan] "
-                f"[yellow]{r.chunk.call_title}[/yellow] | "
-                f"Chunk #{r.chunk.chunk_index} | "
-                f"Similarity: {score:.2f}\n"
-                f'    "[dim]{preview}…[/dim]"'
-            )
-
-
-def _handle_list() -> None:
-    ids = get_call_ids()
-    if not ids:
-        console.print("[yellow]No transcripts ingested yet.[/yellow]")
-    else:
-        console.print(f"\n[bold green]Ingested calls ({len(ids)}):[/bold green]")
-        for cid in ids:
-            console.print(f"  • {cid}")
-
-
-def _handle_summarise(call_id: str) -> None:
-    console.print(f"\n[bold]Summarising call:[/bold] [cyan]{call_id}[/cyan]\n")
-    with console.status("Generating summary…", spinner="dots"):
-        response = summarise_call(call_id)
-    _print_response(response, show_sources=False)
-
-
-def _handle_ingest(path_str: str) -> None:
-    path = path_str.strip().strip("'\"")
-    console.print(f"\n[bold]Ingesting:[/bold] [cyan]{path}[/cyan]")
-    try:
-        with console.status("Processing transcript…", spinner="dots"):
-            call_id = ingest_transcript(path)
-        console.print(f"[green]✓ Ingested successfully as call ID:[/green] [bold]{call_id}[/bold]")
-    except FileNotFoundError as e:
-        console.print(f"[red]Error:[/red] {e}")
-    except Exception as e:
-        console.print(f"[red]Unexpected error during ingestion:[/red] {e}")
-
-
-def _handle_qa(query: str) -> None:
-    console.print()
-    with console.status("Searching transcripts and thinking…", spinner="dots"):
-        response = answer_question(query)
-    _print_response(response, show_sources=True)
-
-
-def _parse_and_dispatch(user_input: str) -> bool:
-    """
-    Route user input to the right handler.
-    Returns False if the user wants to exit.
-    """
-    cmd = user_input.strip()
-    lower = cmd.lower()
-
-    if lower in ("exit", "quit"):
-        console.print("\n[bold]Goodbye! 👋[/bold]\n")
-        return False
-
-    elif lower in ("help",):
-        console.print(Markdown(BANNER))
-
-    elif lower == "list my call ids":
-        _handle_list()
-
-    elif lower == "summarise the last call":
-        call_id = get_latest_call_id()
-        if call_id:
-            _handle_summarise(call_id)
-        else:
-            console.print("[yellow]No calls ingested yet.[/yellow]")
-
-    elif lower.startswith("summarise call "):
-        call_id = cmd[len("summarise call "):].strip()
-        _handle_summarise(call_id)
-
-    elif lower.startswith("ingest a new call transcript from "):
-        path_str = cmd[len("ingest a new call transcript from "):].strip()
-        _handle_ingest(path_str)
-
-    elif lower.startswith("ingest all from "):
-        folder_str = cmd[len("ingest all from "):].strip()
-        _handle_ingest_folder(folder_str)
-
-    elif lower.startswith("ingest "):
-        # short alias: "ingest <path>"
-        path_str = cmd[len("ingest "):].strip()
-        _handle_ingest(path_str)
-
-    else:
-        _handle_qa(cmd)
-
-    return True
-
-
-def main() -> None:
-    console.print(Panel(Markdown(BANNER), border_style="blue"))
-
-    # Auto-ingest the Data folder on every startup
-    data_folder = Path(DATA_FOLDER)
-    if data_folder.is_dir() and any(data_folder.glob("*.txt")):
-        console.print(f"[dim]Auto-ingesting transcripts from [cyan]{DATA_FOLDER}[/cyan]…[/dim]")
-        _handle_ingest_folder(DATA_FOLDER, silent=False)
-        console.print()
-
-    while True:
+    def _handle_ingest(self, path_str: str) -> None:
+        path = path_str.strip().strip("'\"")
+        self.view.display_message(f"\n[bold]Ingesting:[/bold] [cyan]{path}[/cyan]")
         try:
-            console.print()
-            user_input = console.input("[bold blue]You >[/bold blue] ").strip()
-            if not user_input:
-                continue
-            should_continue = _parse_and_dispatch(user_input)
-            if not should_continue:
-                break
-        except KeyboardInterrupt:
-            console.print("\n\n[bold]Interrupted. Goodbye! 👋[/bold]\n")
-            break
+            with self.view.show_status("Processing transcript…"):
+                processed = self.processor.process_file(path)
+                call_id = self.vector_store.ingest_transcript(
+                    processed["call_id"], 
+                    processed["call_title"], 
+                    processed["chunks"]
+                )
+            self.view.display_success(f"Ingested successfully as call ID: [bold]{call_id}[/bold]")
+        except FileNotFoundError as e:
+            self.view.display_error(str(e))
         except Exception as e:
-            console.print(f"\n[red]An error occurred:[/red] {e}\n")
+            self.view.display_error(f"Unexpected error during ingestion: {e}")
 
+    def _handle_qa(self, query: str) -> None:
+        self.view.display_message("")
+        with self.view.show_status("Searching transcripts and thinking…"):
+            response = self.copilot.answer_question(query)
+        self.view.display_response(response, show_sources=True)
+
+    def _parse_and_dispatch(self, user_input: str) -> bool:
+        cmd = user_input.strip()
+        lower = cmd.lower()
+
+        if lower in ("exit", "quit"):
+            self.view.display_message("\n[bold]Goodbye! 👋[/bold]\n")
+            return False
+        elif lower in ("help",):
+            self.view.display_help()
+        elif lower == "list my call ids":
+            self._handle_list()
+        elif lower == "summarise the last call":
+            ids = self.vector_store.get_call_ids()
+            call_id = ids[-1] if ids else None
+            if call_id:
+                self._handle_summarise(call_id)
+            else:
+                self.view.display_warning("No calls ingested yet.")
+        elif lower.startswith("summarise call "):
+            call_id = cmd[len("summarise call "):].strip()
+            self._handle_summarise(call_id)
+        elif lower.startswith("ingest a new call transcript from "):
+            path_str = cmd[len("ingest a new call transcript from "):].strip()
+            self._handle_ingest(path_str)
+        elif lower.startswith("ingest all from "):
+            folder_str = cmd[len("ingest all from "):].strip()
+            self._handle_ingest_folder(folder_str)
+        elif lower.startswith("ingest "):
+            path_str = cmd[len("ingest "):].strip()
+            self._handle_ingest(path_str)
+        else:
+            self._handle_qa(cmd)
+        return True
+
+    def run(self) -> None:
+        self.view.display_banner()
+
+        data_folder = Path(DATA_FOLDER)
+        if data_folder.is_dir() and any(data_folder.glob("*.txt")):
+            self.view.display_message(f"[dim]Auto-ingesting transcripts from [cyan]{DATA_FOLDER}[/cyan]…[/dim]")
+            self._handle_ingest_folder(DATA_FOLDER, silent=False)
+            self.view.display_message("")
+
+        while True:
+            try:
+                self.view.display_message("")
+                user_input = self.view.get_input()
+                if not user_input:
+                    continue
+                should_continue = self._parse_and_dispatch(user_input)
+                if not should_continue:
+                    break
+            except KeyboardInterrupt:
+                self.view.display_message("\n\n[bold]Interrupted. Goodbye! 👋[/bold]\n")
+                break
+            except Exception as e:
+                self.view.display_error(f"An error occurred: {e}")
 
 if __name__ == "__main__":
-    main()
+    controller = SalesChatbotController()
+    controller.run()
