@@ -15,6 +15,7 @@ Available commands (type at the prompt):
     <any other text>  →  Q&A over all ingested transcripts
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,11 +28,42 @@ from rich.rule import Rule
 # Load .env before importing src modules (OPENAI_API_KEY etc.)
 load_dotenv()
 
+# Default folder that is auto-ingested on every startup
+DATA_FOLDER = os.getenv("DATA_FOLDER", "./data")
+
 from src.generation import answer_question, summarise_call
 from src.storage import get_call_ids, get_latest_call_id, ingest_transcript
 from src.models import QueryResponse
 
 console = Console()
+
+def _handle_ingest_folder(folder_path: str, silent: bool = False) -> None:
+    """Ingest all .txt files in a folder, printing progress for each."""
+    folder = Path(folder_path)
+    if not folder.is_dir():
+        console.print(f"[red]Folder not found:[/red] {folder_path}")
+        return
+    txt_files = sorted(folder.glob("*.txt"))
+    if not txt_files:
+        if not silent:
+            console.print(f"[yellow]No .txt files found in {folder_path}[/yellow]")
+        return
+    if not silent:
+        console.print(f"\n[bold]Bulk ingesting {len(txt_files)} file(s) from[/bold] [cyan]{folder_path}[/cyan]")
+    ok, failed = 0, 0
+    for txt in txt_files:
+        try:
+            with console.status(f"  Ingesting [cyan]{txt.name}[/cyan]…", spinner="dots"):
+                call_id = ingest_transcript(str(txt))
+            if not silent:
+                console.print(f"  [green]✓[/green] {txt.name} → [bold]{call_id}[/bold]")
+            ok += 1
+        except Exception as e:
+            console.print(f"  [red]✗[/red] {txt.name}: {e}")
+            failed += 1
+    if not silent:
+        console.print(f"\n[bold green]Done:[/bold green] {ok} ingested, {failed} failed.")
+
 
 BANNER = """
 # 🎙 Sales Call Copilot
@@ -44,6 +76,7 @@ Type a question, or use one of the built-in commands:
 | `summarise the last call` | Summarise the most recent call |
 | `summarise call <call_id>` | Summarise a specific call |
 | `ingest a new call transcript from <path>` | Add a new transcript |
+| `ingest all from <folder>` | Ingest all .txt files from a folder |
 | `help` | Show this message |
 | `exit` / `quit` | Quit |
 """
@@ -138,6 +171,10 @@ def _parse_and_dispatch(user_input: str) -> bool:
         path_str = cmd[len("ingest a new call transcript from "):].strip()
         _handle_ingest(path_str)
 
+    elif lower.startswith("ingest all from "):
+        folder_str = cmd[len("ingest all from "):].strip()
+        _handle_ingest_folder(folder_str)
+
     elif lower.startswith("ingest "):
         # short alias: "ingest <path>"
         path_str = cmd[len("ingest "):].strip()
@@ -151,6 +188,13 @@ def _parse_and_dispatch(user_input: str) -> bool:
 
 def main() -> None:
     console.print(Panel(Markdown(BANNER), border_style="blue"))
+
+    # Auto-ingest the Data folder on every startup
+    data_folder = Path(DATA_FOLDER)
+    if data_folder.is_dir() and any(data_folder.glob("*.txt")):
+        console.print(f"[dim]Auto-ingesting transcripts from [cyan]{DATA_FOLDER}[/cyan]…[/dim]")
+        _handle_ingest_folder(DATA_FOLDER, silent=False)
+        console.print()
 
     while True:
         try:

@@ -12,9 +12,9 @@ from src.utils import chunk_text
 # --- Configuration ---
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 COLLECTION_NAME = "call_transcripts"
-CHUNK_SIZE = 400       # characters per chunk
-CHUNK_OVERLAP = 80     # overlap to preserve context
-TOP_K = 5              # default number of chunks to retrieve
+CHUNK_SIZE = 400
+CHUNK_OVERLAP = 80
+TOP_K = 5
 
 
 def _get_collection() -> chromadb.Collection:
@@ -29,7 +29,6 @@ def _get_collection() -> chromadb.Collection:
     return collection
 
 
-
 def ingest_transcript(file_path: str) -> str:
     """
     Ingest a call transcript file into the vector store.
@@ -41,14 +40,11 @@ def ingest_transcript(file_path: str) -> str:
         raise FileNotFoundError(f"Transcript file not found: {file_path}")
 
     raw_text = path.read_text(encoding="utf-8").strip()
-    call_title = path.stem  # filename without extension used as title
-
-    # Derive a stable call_id from the stem so re-ingesting same file is idempotent
+    call_title = path.stem
     call_id = re.sub(r"[^a-zA-Z0-9_-]", "_", call_title)
 
     collection = _get_collection()
 
-    # Remove existing chunks for this call_id to allow re-ingestion
     existing = collection.get(where={"call_id": call_id})
     if existing["ids"]:
         collection.delete(ids=existing["ids"])
@@ -87,7 +83,7 @@ def get_call_ids() -> List[str]:
 
 
 def get_latest_call_id() -> Optional[str]:
-    """Return the most-recently-ingested call ID (last alphabetically for now)."""
+    """Return the most-recently-ingested call ID (last alphabetically)."""
     ids = get_call_ids()
     return ids[-1] if ids else None
 
@@ -97,10 +93,7 @@ def search_chunks(
     call_id: Optional[str] = None,
     top_k: int = TOP_K,
 ) -> List[SearchResult]:
-    """
-    Embed `query` and return the top-k most relevant TranscriptChunks.
-    Optionally filter by a specific call_id.
-    """
+    """Embed query and return the top-k most relevant TranscriptChunks."""
     collection = _get_collection()
     where = {"call_id": call_id} if call_id else None
 
