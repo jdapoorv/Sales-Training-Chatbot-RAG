@@ -2,12 +2,61 @@ import os
 from typing import List, Optional
 
 from openai import OpenAI
+from google import genai
 
 from src.models import QueryResponse, SearchResult
-from src.storage import get_all_chunks_for_call, search_chunks, get_latest_call_id
+from src.storage import get_all_chunks_for_call, search_chunks
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# --- Global State (Lazy Indexed) ---
+_client = None
+_model_name = None
+
+def _get_provider_info():
+    """Retrieve provider and model from environment."""
+    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    
+    if provider == "openai":
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        key = os.getenv("OPENAI_API_KEY")
+    elif provider == "groq":
+        model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        key = os.getenv("GROQ_API_KEY")
+    elif provider == "ollama":
+        model = os.getenv("OLLAMA_MODEL", "llama3")
+        key = "ollama"  # dummy
+    elif provider == "gemini":
+        model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+        key = os.getenv("GEMINI_API_KEY")
+    else:
+        raise ValueError(f"Unsupported LLM_PROVIDER: {provider}")
+    
+    return provider, model, key
+
+def _ensure_client():
+    """Lazy initialization of the LLM client."""
+    global _client, _model_name
+    if _client is not None:
+        return _client, _model_name, os.getenv("LLM_PROVIDER", "openai").lower()
+
+    provider, model, key = _get_provider_info()
+    _model_name = model
+
+    if not key and provider != "ollama":
+        raise ValueError(f"Missing API key for provider '{provider}'. Please check your .env file.")
+
+    if provider == "openai":
+        _client = OpenAI(api_key=key)
+    elif provider == "groq":
+        _client = OpenAI(api_key=key, base_url="https://api.groq.com/openai/v1")
+    elif provider == "ollama":
+        _client = OpenAI(
+            api_key="ollama",
+            base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        )
+    elif provider == "gemini":
+        _client = genai.Client(api_key=key)
+    
+    return _client, _model_name, provider
 
 
 # ---------------------------------------------------------------------------
@@ -31,56 +80,43 @@ def _format_full_transcript(call_id: str) -> str:
     return "\n".join(c.text for c in chunks)
 
 
-def _source_snippet(r: SearchResult) -> str:
-    """Return a compact, human-readable snippet for one source chunk."""
-    preview = r.chunk.text.strip().replace("\n", " ")[:120]
-    return (
-        f'  • [{r.chunk.call_title} | Chunk #{r.chunk.chunk_index}] '
-        f'"{preview}…"'
-    )
+def _call_llm(system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
+    """Unified wrapper to call different LLM providers."""
+    client, model, provider = _ensure_client()
+
+    if provider in ["openai", "groq", "ollama"]:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+        )
+        return response.choices[0].message.content.strip()
+    
+    elif provider == "gemini":
+        # Using the new google-genai SDK
+        full_prompt = f"{system_prompt}\n\nUSER INPUT:\n{user_prompt}"
+        response = client.models.generate_content(
+            model=model,
+            contents=full_prompt,
+            config={'temperature': temperature}
+        )
+        return response.text.strip()
+    
+    return ""
 
 
 # ---------------------------------------------------------------------------
-# Q&A over all (or a specific) call(s)
+# Public API
 # ---------------------------------------------------------------------------
-
-QA_SYSTEM_PROMPT = """\
-You are a sales-call analyst AI. Your job is to answer the user's question \
-using ONLY the transcript excerpts provided below. 
-
-Rules:
-1. Base your answer strictly on the provided context; do not invent facts.
-2. If the context does not contain enough information, say so clearly.
-3. Be concise and precise.
-4. When you cite a fact, reference the source in-line as [Source N].
-"""
-
-QA_USER_TEMPLATE = """\
-### Transcript Excerpts
-{context}
-
-### Question
-{question}
-
-Provide a clear, direct answer and reference every specific claim with [Source N] \
-where N matches the excerpt number above.
-"""
-
 
 def answer_question(
     query: str,
     call_id: Optional[str] = None,
     top_k: int = 5,
 ) -> QueryResponse:
-    """
-    RAG-based Q&A: retrieve relevant chunks then ask the LLM.
-
-    Parameters
-    ----------
-    query   : the user's natural-language question
-    call_id : if provided, restrict search to this specific call
-    top_k   : number of chunks to retrieve
-    """
     results = search_chunks(query, call_id=call_id, top_k=top_k)
     if not results:
         return QueryResponse(
@@ -89,73 +125,21 @@ def answer_question(
         )
 
     context = _format_context(results)
-    user_msg = QA_USER_TEMPLATE.format(context=context, question=query)
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": QA_SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.2,
-    )
-
-    answer = response.choices[0].message.content.strip()
+    user_msg = f"### Transcript Excerpts\n{context}\n\n### Question\n{query}\n\nProvide a clear, direct answer and reference every specific claim with [Source N] where N matches the excerpt number above."
+    
+    system_prompt = "You are a sales-call analyst AI. Your job is to answer using ONLY the transcript excerpts provided. Cite facts using [Source N]."
+    
+    answer = _call_llm(system_prompt, user_msg, temperature=0.2)
     return QueryResponse(answer=answer, sources=results)
 
 
-# ---------------------------------------------------------------------------
-# Summarisation of a specific call
-# ---------------------------------------------------------------------------
-
-SUMMARY_SYSTEM_PROMPT = """\
-You are an expert sales-call analyst. Summarise the provided call transcript \
-in a structured way. Your summary MUST include:
-
-1. **Call Overview** – participants (if mentioned), date/time (if mentioned), \
-   and overall topic.
-2. **Key Discussion Points** – bullet list of the main topics discussed.
-3. **Sentiment & Objections** – overall tone, any concerns or objections raised \
-   by the prospect.
-4. **Next Steps / Action Items** – concrete follow-ups mentioned in the call.
-5. **Pricing / Commercial Discussion** – any pricing, discounts, or budget topics \
-   (mark "None mentioned" if absent).
-
-Be factual. Do not embellish or invent.
-"""
-
-SUMMARY_USER_TEMPLATE = """\
-### Call Transcript
-{transcript}
-
-Produce the structured summary as instructed.
-"""
-
-
 def summarise_call(call_id: str) -> QueryResponse:
-    """
-    Summarise an entire call transcript.
-
-    For short transcripts we use the full text directly;  
-    structured sections give the LLM enough context for a quality summary.
-    """
     transcript = _format_full_transcript(call_id)
     if not transcript.strip():
-        return QueryResponse(
-            answer=f"No transcript data found for call '{call_id}'.",
-            sources=[],
-        )
+        return QueryResponse(answer=f"No transcript found for '{call_id}'.", sources=[])
 
-    user_msg = SUMMARY_USER_TEMPLATE.format(transcript=transcript)
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
-            {"role": "user", "content": user_msg},
-        ],
-        temperature=0.3,
-    )
-
-    answer = response.choices[0].message.content.strip()
+    system_prompt = "You are an expert sales-call analyst. Summarise the transcript with: Overview, Key Discussion Points, Sentiment/Objections, Next Steps, and Pricing."
+    user_msg = f"### Call Transcript\n{transcript}\n\nProduce the structured summary as instructed."
+    
+    answer = _call_llm(system_prompt, user_msg, temperature=0.3)
     return QueryResponse(answer=answer, sources=[])

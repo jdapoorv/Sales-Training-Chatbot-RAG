@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cli.py – Interactive command-line chatbot for the Sales Call Copilot.
+cli.py – Interactive command-line chatbot for the Sales Call GenAI Chatbot.
 
 Usage:
     python cli.py
@@ -66,7 +66,7 @@ def _handle_ingest_folder(folder_path: str, silent: bool = False) -> None:
 
 
 BANNER = """
-# 🎙 Sales Call Copilot
+# 🎙 Sales Call GenAI Chatbot
 
 Type a question, or use one of the built-in commands:
 

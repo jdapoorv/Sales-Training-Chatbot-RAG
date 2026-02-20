@@ -1,4 +1,4 @@
-# Sales Call Copilot 🎙
+# Sales Call GenAI Chatbot 
 
 A CLI chatbot that ingests sales call transcripts, stores them as vector embeddings, and lets you ask natural-language questions — citing the exact conversation segments that informed each answer.
 
@@ -13,7 +13,7 @@ Clari_Chatbot/
 │   ├── models.py       ← Data classes (TranscriptChunk, SearchResult, QueryResponse)
 │   ├── storage.py      ← ChromaDB ingestion, chunking, semantic search
 │   └── generation.py   ← OpenAI RAG Q&A + structured call summarisation
-├── samples/            ← Sample call transcripts (3 included)
+├── data/            ← Sample call transcripts (4 included)
 ├── tests/
 │   └── test_storage.py ← Unit tests (pytest, mocked ChromaDB)
 ├── requirements.txt
@@ -62,9 +62,9 @@ python cli.py
 
 ```
 You > list my call ids
-You > ingest a new call transcript from samples/enterprise-prospect-01.txt
+You > ingest a new call transcript from data/1_demo_call.txt
 You > summarise the last call
-You > summarise call smb-renewal-02
+You > summarise call 1_demo_call
 You > Give me all negative comments when pricing was mentioned in the calls
 You > What integrations were discussed across all calls?
 You > exit
