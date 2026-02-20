@@ -6,30 +6,41 @@ A CLI chatbot that ingests sales call transcripts, stores them as vector embeddi
 
 ## Architecture
 
+The project is built using **SOLID principles** and an **MVC (Model-View-Controller) architecture**, ensuring a clean separation of concerns and a modular codebase.
+
 ```
 Clari_Chatbot/
-├── cli.py              ← Entry point (interactive CLI)
+├── cli.py              ← Controller (orchestrates user input and commands)
 ├── src/
-│   ├── models.py       ← Data classes (TranscriptChunk, SearchResult, QueryResponse)
-│   ├── storage.py      ← ChromaDB ingestion, chunking, semantic search
-│   └── generation.py   ← OpenAI RAG Q&A + structured call summarisation
-├── data/            ← Sample call transcripts (4 included)
+│   ├── view.py         ← View (handles all terminal rendering via Rich)
+│   ├── copilot.py      ← Orchestrator (manages RAG logic, depends on interfaces)
+│   ├── interfaces.py   ← Abstractions (VectorStore and LLMProvider interfaces)
+│   ├── processor.py    ← Service (handles file processing and chunking - SRP)
+│   ├── storage.py      ← Model (ChromaDB implementation of VectorStore)
+│   ├── generation.py   ← Model (LLM Provider implementations & Factory)
+│   └── models.py       ← Blueprint (shared data classes)
+├── data/               ← Sample call transcripts
 ├── tests/
-│   └── test_storage.py ← Unit tests (pytest, mocked ChromaDB)
-├── requirements.txt
-├── .env.example
-└── setup_commands.md
+└── .env.example
 ```
+
+### Technical Stack
+
+| Layer | Component | Responsibility |
+|---|---|---|
+| **View** | `ConsoleView` | Pure presentation layer using `rich`. No business logic. |
+| **Model** | `ChromaVectorStore` | Persistent vector storage using ChromaDB. |
+| **Model** | `LLMProvider` | Abstracts OpenAI, Groq, Gemini, and Ollama. |
+| **Controller** | `SalesChatbotController` | Glues input to the Model and View. |
+| **Service** | `TranscriptProcessor` | Handles char-based chunking with smart boundaries. |
+
+---
 
 ### Storage Design
 
-| Layer | Technology | Why |
-|---|---|---|
-| **Vector store** | ChromaDB (local persistent) | Zero-infra, embedded, fast cosine similarity, metadata filtering |
-| **Embeddings** | ChromaDB default (all-MiniLM-L6-v2) | Fast, local, no extra API cost |
-| **Schema** | Each transcript → N overlapping chunks; each chunk stores `call_id`, `call_title`, `chunk_index`, `start_char`, `end_char` as metadata | Enables per-call filtering and precise source highlighting |
-
-**Chunking strategy**: 400-character chunks with 80-character overlap, breaking on sentence/line boundaries where possible. This balances context richness and embedding precision.
+- **Vector store**: ChromaDB (local persistent) — zero-infra, fast cosine similarity.
+- **Embeddings**: ChromaDB default (`all-MiniLM-L6-v2`) — performant and local.
+- **Chunking**: 400-char chunks with 80-char overlap, preserving sentence boundaries.
 
 ---
 
